@@ -99,18 +99,18 @@ def get_cfgs():
             "RL_calf_joint",
         ],
         # PD
-        "kp": 20.0,
-        "kd": 0.5,
+        "kp": 10.0,
+        "kd": 1.0,
         # termination
         "termination_if_roll_greater_than": 10,  # degree
         "termination_if_pitch_greater_than": 10,
         # base pose
-        "base_init_pos": [0.0, 0.0, 0.42],
+        "base_init_pos": [0.0, 0.0, 0.4],
         "base_init_quat": [1.0, 0.0, 0.0, 0.0],
         "episode_length_s": 20.0,
         "resampling_time_s": 4.0,
-        "action_scale": 0.25,
-        "simulate_action_latency": True,
+        "action_scale": 0.15,
+        "simulate_action_latency": False,
         "clip_actions": 100.0,
     }
     obs_cfg = {
@@ -127,19 +127,21 @@ def get_cfgs():
         "base_height_target": 0.3,
         "feet_height_target": 0.075,
         "reward_scales": {
-            "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.2,
+            "tracking_lin_vel": 0.0,
+            "tracking_ang_vel": 2.0,
             "lin_vel_z": -1.0,
-            "base_height": -50.0,
-            "action_rate": -0.005,
-            "similar_to_default": -0.1,
+            "base_height": -5.0,
+            "action_rate": -0.01,
+            "vertical_motion": -5.0,
+            "upright": -5.0,
+            "similar_to_default": -0.2,
         },
     }
     command_cfg = {
         "num_commands": 3,
-        "lin_vel_x_range": [0.5, 0.5],
+        "lin_vel_x_range": [0, 0],
         "lin_vel_y_range": [0, 0],
-        "ang_vel_range": [0, 0],
+        "ang_vel_range": [0.3, 0.3],
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg
@@ -149,7 +151,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp_name", type=str, default="go2-walking")
     parser.add_argument("-B", "--num_envs", type=int, default=4096)
-    parser.add_argument("--max_iterations", type=int, default=101)
+    parser.add_argument("--max_iterations", type=int, default=750)
     parser.add_argument("--backend", type=str, choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("-v", "--vis", action="store_true", help="Visualize", default=False)
     args = parser.parse_args()
@@ -169,8 +171,17 @@ def main():
         open(f"{log_dir}/cfgs.pkl", "wb"),
     )
 
+    # env = Go2Env(
+    #     num_envs=args.num_envs, env_cfg=env_cfg, obs_cfg=obs_cfg, reward_cfg=reward_cfg, command_cfg=command_cfg
+    # )
+
     env = Go2Env(
-        num_envs=args.num_envs, env_cfg=env_cfg, obs_cfg=obs_cfg, reward_cfg=reward_cfg, command_cfg=command_cfg
+        num_envs=args.num_envs,
+        env_cfg=env_cfg,
+        obs_cfg=obs_cfg,
+        reward_cfg=reward_cfg,
+        command_cfg=command_cfg,
+        show_viewer=args.vis
     )
 
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
@@ -184,4 +195,8 @@ if __name__ == "__main__":
 """
 # training
 python rl-training-genesis/locomotion/go2/basic/go2_train.py --backend gpu -v
+
+python3.12 rl-training-genesis/locomotion/go2/basic/go2_train.py --backend gpu --num_envs 1 -v
 """
+
+"""python3.12 rl-training-genesis/locomotion/go2/basic/go2_train.py --backend gpu --num_envs 1 -v"""

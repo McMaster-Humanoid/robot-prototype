@@ -29,7 +29,7 @@ def main():
     parser.add_argument("-v", "--vis", action="store_true", help="Visualize", default=False)
     args = parser.parse_args()
 
-    gs.init(backend=gs.cpu)
+    gs.init(backend=gs.gpu)
 
     log_dir = f"logs/{args.exp_name}"
     env_cfg, obs_cfg, reward_cfg, command_cfg, train_cfg = pickle.load(open(f"logs/{args.exp_name}/cfgs.pkl", "rb"))
@@ -62,5 +62,5 @@ if __name__ == "__main__":
 
 """
 # evaluation
-python rl-training-genesis/locomotion/go2/basic/go2_eval.py -e go2-walking -v --ckpt 100
+python3.12 rl-training-genesis/locomotion/go2/basic/go2_eval.py -e go2-walking -v --ckpt 499
 """
