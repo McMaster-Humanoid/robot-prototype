@@ -448,3 +448,27 @@ class Go2Env:
         ang_vel_penalty = torch.sum(torch.square(self.base_ang_vel), dim=1)
         joint_vel_penalty = torch.sum(torch.square(self.dof_vel), dim=1)
         return lin_vel_penalty + ang_vel_penalty * 0.1 + joint_vel_penalty * 0.01
+
+    def _reward_gait_frequency(self):
+        # Penalize if both feet are in the air or on ground for too long
+        contacts = self.feet_contact_time > 0.0
+        both_contact = contacts.sum(dim=1) == 2
+        both_air = contacts.sum(dim=1) == 0
+        return -(both_contact.float() * 0.5 + both_air.float() * 1.0)
+    
+    def _reward_forward_progress(self):
+        # Reward for actually moving in commanded direction
+        cmd_vel = self.commands[:, :2]
+        actual_vel = self.base_lin_vel[:, :2]
+        return torch.sum(cmd_vel * actual_vel, dim=1)
+
+    def _reward_hip_roll(self):
+        # Penalize hip roll joints deviating from target (legs closer together)
+        left_hip_roll_idx = self.env_cfg["joint_names"].index("left_hip_roll_joint")
+        right_hip_roll_idx = self.env_cfg["joint_names"].index("right_hip_roll_joint")
+        
+        # Target: left=+0.08, right=-0.08 (legs closer)
+        left_error = torch.square(self.dof_pos[:, left_hip_roll_idx] - 0.08)
+        right_error = torch.square(self.dof_pos[:, right_hip_roll_idx] + 0.08)
+        
+        return left_error + right_error

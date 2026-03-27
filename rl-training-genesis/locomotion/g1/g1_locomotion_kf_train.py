@@ -112,26 +112,33 @@ def get_cfgs():
     
     reward_cfg = {
         "tracking_sigma": 0.25,
-        "base_height_target": 0.72,          
+        "base_height_target": 0.72,
         "reward_scales": {
-            # Positive rewards (encourage good behavior)
-            "alive": 2.0,              # Survival bonus - most important early on
-            "tracking_lin_vel": 1.0,   # Reduced - less important until standing
+            # Core locomotion rewards
+            "tracking_lin_vel": 1.5,      # Primary goal: follow velocity commands
+            "tracking_ang_vel": 0.5,      # Turn when commanded
             
-            # Penalties (now properly scaled for radians)
-            "base_height": -10.0,      # Reduced from -50
-            "orientation": -2.0,       # Reduced - now uses radians internally
-            "action_rate": -0.01,      # Smoothing
-            "similar_to_default": -0.2, # Reduced - allow some deviation
+            # Gait rewards (critical for walking)
+            "feet_air_time": 1.0,         # Encourage alternating stance/swing
+            "foot_clearance": 0.2,        # Lift feet during swing phase
+            
+            # Stability rewards
+            "alive": 1.0,                 # Keep alive but less dominant
+            "base_height": -5.0,          # Maintain height
+            "orientation": -2.0,          # Stay upright
+            
+            # Regularization
+            "action_rate": -0.01,         # Smooth actions
+            "similar_to_default": -0.1,   # Allow deviation for gait
+            "lin_vel_z": -2.0,            # Minimize bouncing
         },
     }
     
     command_cfg = {
         "num_commands": 3,
-        # Start with standing (zero velocity) - learn to balance first
-        "lin_vel_x_range": [0.0, 0.0],
-        "lin_vel_y_range": [0.0, 0.0],
-        "ang_vel_range": [0.0, 0.0],
+        "lin_vel_x_range": [0.3, 0.8],    # Forward walking speed (m/s)
+        "lin_vel_y_range": [-0.2, 0.2],   # Lateral velocity
+        "ang_vel_range": [-0.5, 0.5],     # Turning (rad/s)
     }
     
     return env_cfg, obs_cfg, reward_cfg, command_cfg
