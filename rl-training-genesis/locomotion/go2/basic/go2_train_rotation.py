@@ -128,19 +128,20 @@ def get_cfgs():
         "base_height_target": 0.3,
         "feet_height_target": 0.075,
         "reward_scales": {
-            "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.2,
-            "lin_vel_z": -1.0,
-            "base_height": -50.0,
-            "action_rate": -0.005,
-            "similar_to_default": -0.1,
+            "tracking_lin_vel": 0.0,   # Disabled — linear vel commands are always 0, this just rewards standing still
+            "tracking_ang_vel": 5.0,   # Main objective — heavily reward spinning
+            "lin_vel_z": -2.0,         # Penalise bouncing
+            "base_height": -5.0,       # Mild height penalty (was -50, too dominant)
+            "action_rate": -0.01,
+            "similar_to_default": 0.0, # Disabled — discourages novel spinning gaits
         },
     }
     command_cfg = {
         "num_commands": 3,
-        "lin_vel_x_range": [0.5, 0.5],
-        "lin_vel_y_range": [0, 0],
-        "ang_vel_range": [0, 0],
+        # ROTATION TRAINING: Set linear velocity to 0, angular velocity to non-zero
+        "lin_vel_x_range": [0.0, 0.0],  # No forward movement
+        "lin_vel_y_range": [0.0, 0.0],  # No sideways movement
+        "ang_vel_range": [-1.0, 1.0],   # Z-axis rotation (yaw)
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg
@@ -148,9 +149,9 @@ def get_cfgs():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-e", "--exp_name", type=str, default="go2-walking")
+    parser.add_argument("-e", "--exp_name", type=str, default="go2-rotation")
     parser.add_argument("-B", "--num_envs", type=int, default=4096)
-    parser.add_argument("--max_iterations", type=int, default=101)
+    parser.add_argument("--max_iterations", type=int, default=500)
     parser.add_argument("--backend", type=str, choices=["cpu", "gpu"], default="cpu")
     parser.add_argument("-v", "--vis", action="store_true", help="Visualize", default=False)
     args = parser.parse_args()
@@ -173,11 +174,27 @@ def main():
         open(f"{log_dir}/cfgs.pkl", "wb"),
     )
 
+    print(f"\n{'='*70}")
+    print(f"Starting Go2 Rotation Training")
+    print(f"{'='*70}")
+    print(f"Experiment: {args.exp_name}")
+    print(f"Num Envs: {args.num_envs}")
+    print(f"Max Iterations: {args.max_iterations}")
+    print(f"Backend: {args.backend}")
+    print(f"Command Config:")
+    print(f"  - Linear X: {command_cfg['lin_vel_x_range']}")
+    print(f"  - Linear Y: {command_cfg['lin_vel_y_range']}")
+    print(f"  - Angular Z (rotation): {command_cfg['ang_vel_range']}")
+    print(f"{'='*70}\n")
+
     env = Go2Env(
         num_envs=args.num_envs, env_cfg=env_cfg, obs_cfg=obs_cfg, reward_cfg=reward_cfg, command_cfg=command_cfg
     )
 
     runner = OnPolicyRunner(env, train_cfg, log_dir, device=gs.device)
+
+    # Initialize obs buffer properly before training
+    env.reset()
 
     runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
@@ -185,7 +202,22 @@ def main():
 if __name__ == "__main__":
     main()
 
+
 """
-# training
-python rl-training-genesis/locomotion/go2/basic/go2_train.py --backend gpu -v
+Training script for Go2 quadruped rotation (z-axis/yaw)
+
+Key differences from walking training:
+- ang_vel_range set to [-1.0, 1.0] instead of [0, 0]
+- lin_vel_x_range and lin_vel_y_range set to [0.0, 0.0]
+- tracking_ang_vel reward increased from 0.2 to 1.0
+
+Usage:
+# Train with CPU (slower but works on all systems):
+python3 rl-training-genesis/locomotion/go2/basic/go2_train_rotation.py --backend cpu --num_envs 2048 --max_iterations 500
+
+# Train with GPU (faster):
+python3 rl-training-genesis/locomotion/go2/basic/go2_train_rotation.py --backend gpu --num_envs 4096 --max_iterations 500
+
+# Quick test:
+python3 rl-training-genesis/locomotion/go2/basic/go2_train_rotation.py --backend cpu --num_envs 128 --max_iterations 10
 """
