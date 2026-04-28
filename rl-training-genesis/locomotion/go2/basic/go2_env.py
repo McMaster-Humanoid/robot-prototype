@@ -6,6 +6,8 @@ import genesis as gs
 from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
 from genesis.utils.misc import tensor_to_array
 
+from go2_steps_jb_env import Steps_Environment
+
 
 def gs_rand(lower, upper, batch_shape):
     assert lower.shape == upper.shape
@@ -56,13 +58,8 @@ class Go2Env:
             show_viewer=show_viewer,
         )
 
-        # add plain
-        self.scene.add_entity(
-            gs.morphs.URDF(
-                file="urdf/plane/plane.urdf",
-                fixed=True,
-            )
-        )
+        # add stepped terrain
+        self.jb = Steps_Environment(scene=self.scene)
 
         # add robot
         self.robot = self.scene.add_entity(
