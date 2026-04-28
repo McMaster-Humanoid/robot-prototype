@@ -35,6 +35,7 @@ class Go2Env:
         self.obs_scales = obs_cfg["obs_scales"]
         self.reward_scales = reward_cfg["reward_scales"]
 
+
         # create scene
         self.scene = gs.Scene(
             sim_options=gs.options.SimOptions(
@@ -59,7 +60,7 @@ class Go2Env:
         )
 
         # add stepped terrain
-        self.jb = Steps_Environment(scene=self.scene)
+        self.steps_scene = Steps_Environment(scene=self.scene)
 
         # add robot
         self.robot = self.scene.add_entity(
@@ -67,6 +68,7 @@ class Go2Env:
                 file="urdf/go2/urdf/go2.urdf",
                 pos=self.env_cfg["base_init_pos"],
                 quat=self.env_cfg["base_init_quat"],
+                links_to_keep=["FL_foot", "FR_foot", "RL_foot", "RR_foot"],
             ),
         )
 
@@ -80,6 +82,13 @@ class Go2Env:
             device=gs.device,
         )
         self.actions_dof_idx = torch.argsort(self.motors_dof_idx)
+
+        # foot link indices (entity-local) for contact / air-time tracking
+        self.feet_indices = torch.tensor(
+            [self.robot.get_link(name).idx_local for name in ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]],
+            dtype=gs.tc_int,
+            device=gs.device,
+        )
 
         # PD control parameters
         self.robot.set_dofs_kp([self.env_cfg["kp"]] * self.num_actions, self.motors_dof_idx)
@@ -134,6 +143,8 @@ class Go2Env:
             dtype=gs.tc_float,
             device=gs.device,
         )
+        self.feet_air_time = torch.zeros((self.num_envs, 4), dtype=gs.tc_float, device=gs.device)
+        self.last_contacts = torch.zeros((self.num_envs, 4), dtype=torch.bool, device=gs.device)
         self.extras = dict()  # extra information for logging
         self.extras["observations"] = dict()
 
@@ -161,7 +172,7 @@ class Go2Env:
         # update buffers
         self.episode_length_buf += 1
         self.base_pos = self.robot.get_pos()
-        print("base_pos", self.base_pos)
+        #print("base_pos", self.base_pos)
         self.base_quat = self.robot.get_quat()
         self.base_euler = quat_to_xyz(
             transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True
@@ -230,6 +241,8 @@ class Go2Env:
             self.last_dof_vel.zero_()
             self.episode_length_buf.zero_()
             self.reset_buf.fill_(True)
+            self.feet_air_time.zero_()
+            self.last_contacts.zero_()
         else:
             torch.where(envs_idx[:, None], self.init_base_pos, self.base_pos, out=self.base_pos)
             torch.where(envs_idx[:, None], self.init_base_quat, self.base_quat, out=self.base_quat)
@@ -246,6 +259,8 @@ class Go2Env:
             self.last_dof_vel.masked_fill_(envs_idx[:, None], 0.0)
             self.episode_length_buf.masked_fill_(envs_idx, 0)
             self.reset_buf.masked_fill_(envs_idx, True)
+            self.feet_air_time.masked_fill_(envs_idx[:, None], 0.0)
+            self.last_contacts.masked_fill_(envs_idx[:, None], False)
 
         # fill extras
         n_envs = envs_idx.sum() if envs_idx is not None else self.num_envs
@@ -305,3 +320,18 @@ class Go2Env:
     def _reward_base_height(self):
         # Penalize base height away from target
         return torch.square(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
+
+    def _reward_feet_air_time(self):
+        # Reward feet for spending ~0.5s in the air before landing.
+        # Encourages a real cyclic gait instead of standing or single-foot pivoting.
+        contact_z = self.robot.get_links_net_contact_force()[:, self.feet_indices, 2]
+        contact = contact_z > 1.0
+        first_contact = (~self.last_contacts) & contact
+        self.feet_air_time += self.dt
+        rew = torch.sum((self.feet_air_time - 0.5) * first_contact.float(), dim=1)
+        # only credit gait when commanded to move (linear or angular)
+        cmd_active = (torch.norm(self.commands[:, :2], dim=1) > 0.1) | (torch.abs(self.commands[:, 2]) > 0.1)
+        rew = rew * cmd_active.float()
+        self.feet_air_time = self.feet_air_time * (~contact).float()
+        self.last_contacts = contact
+        return rew

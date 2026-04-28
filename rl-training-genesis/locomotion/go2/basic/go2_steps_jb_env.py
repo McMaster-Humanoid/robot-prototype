@@ -10,7 +10,7 @@ class Steps_Environment:
         map_size=40,
         platform_size=8,
         gap=1,
-        max_height=20,
+        max_height=0,
         horizontal_scale=0.05,
         vertical_scale=0.005,
     ):

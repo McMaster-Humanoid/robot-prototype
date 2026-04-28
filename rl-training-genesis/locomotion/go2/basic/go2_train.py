@@ -123,23 +123,24 @@ def get_cfgs():
         },
     }
     reward_cfg = {
-        "tracking_sigma": 0.25,
+        "tracking_sigma": 0.5,
         "base_height_target": 0.3,
         "feet_height_target": 0.075,
         "reward_scales": {
             "tracking_lin_vel": 1.0,
-            "tracking_ang_vel": 0.2,
+            "tracking_ang_vel": 1.0,
             "lin_vel_z": -1.0,
             "base_height": -50.0,
             "action_rate": -0.005,
             "similar_to_default": -0.1,
+            "feet_air_time": 1.0,
         },
     }
     command_cfg = {
         "num_commands": 3,
-        "lin_vel_x_range": [0.5, 0.5],
+        "lin_vel_x_range": [0, 0],
         "lin_vel_y_range": [0, 0],
-        "ang_vel_range": [0, 0],
+        "ang_vel_range": [1, 1],
     }
 
     return env_cfg, obs_cfg, reward_cfg, command_cfg
