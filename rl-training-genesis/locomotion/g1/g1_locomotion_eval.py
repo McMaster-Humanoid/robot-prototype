@@ -61,5 +61,5 @@ if __name__ == "__main__":
 
 """
 # evaluation
-python rl-training-genesis/go2_eval.py --ckpt 1000
+python rl-training-genesis/g1_locomotion_eval.py --ckpt 1000
 """

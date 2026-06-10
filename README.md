@@ -1,110 +1,103 @@
-# VLA Manipulation for Unitree G1
+# Humanoid One-Leg Robot - Project Structure
 
-**McMaster Humanoid Project**  
-**Demo Date**: February 8, 2026
+This repository contains code, configurations, and documentation for the McMaster Humanoid club's research spanning reinforcement learning, ROS2 systems, embedded firmware, and computer vision.
 
-Using Visual-Language-Action (VLA) models with LeRobot + Genesis for G1 humanoid manipulation.
+## Directory Overview
 
----
+### `rl-training-genesis/`
 
-## 🎯 Quick Start
+Genesis physics engine-based reinforcement learning for quadruped robots (G1, Go2).
 
-```bash
-# Activate environment
-cd ~/one-leg-robot
-source vla_env/bin/activate
+#### `locomotion/`
 
-# Test G1 environment
-python feb8_demo/test_g1_quick.py
-```
+Locomotion training and evaluation environments for different robots.
 
----
+- **`g1/`** – G1 humanoid robot training (multiple DOF variants)
+  - Training scripts and environment implementations
+  - Kalman filter and Genesis-based approaches
+  - Evaluation utilities
+- **`go2/`** – Go2 quadruped robot training
+  - Basic locomotion scenarios
+  - Challenging terrain variations
 
-## 📚 Documentation
+#### `manipulations/`
 
-**Start here**: `docs/README.md` - Complete documentation index
+Manipulation task environments for different robots.
 
-**Key files**:
-- `docs/FEB8_SUCCESS_PLAN.md` - 14-day demo plan ⭐
-- `docs/vla_setup_short.md` - Quick technical reference
-- `docs/FEB8_DEMO_GENESIS.md` - Genesis implementation approach
+- **`g1/`** – G1 manipulation scenarios with environment definitions and testing utilities
+- **`go2/`** – Go2 manipulation scenarios (e.g., object balancing, object interaction)
 
----
+#### `models/`
 
-## 📁 Project Structure
+Robot model definitions in URDF format for simulation.
 
-```
-one-leg-robot/
-├── docs/                    # All documentation
-│   ├── README.md           # Documentation index
-│   ├── FEB8_SUCCESS_PLAN.md # Master plan
-│   └── ...
-├── g1_manipulation/         # G1 environment (main code)
-│   ├── env.py              # G1ManipulationEnv
-│   └── test_env.py         # Tests
-├── feb8_demo/               # Demo scripts
-│   ├── test_g1_quick.py    # Quick test
-│   └── test_g1_with_viewer.py # Visual test
-├── rl-training-genesis/     # G1 model & training
-│   └── models/
-│       ├── g1_12dof.urdf   # Robot model
-│       └── meshes/         # 64 STL files
-└── vla_env/                 # Python environment
-```
+- Multiple G1 variants (different DOF configurations)
+- **`meshes/`** – 3D mesh files for visualization
+
+#### `logs/`
+
+Training logs, model checkpoints, and metadata.
+
+- Organized by robot and configuration (e.g., G1 12-DOF)
+- Contains model checkpoints and TensorBoard event files
+- Git history snapshots
 
 ---
 
-## ✅ Status (Feb 2, 2026)
+### `vla-research/`
 
-```
-✅ LeRobot 0.4.3 installed & working
-✅ Genesis 0.3.13 simulation ready
-✅ G1 meshes loaded (64 files)
-✅ G1 loads successfully in Genesis
-✅ ACT training proven (PushT: 94% loss reduction)
-✅ G1ManipulationEnv created
-🔄 Ready for demonstration recording
-```
+Vision-Language-Action (VLA) research and demonstration code.
 
----
+### `image-processor/`
 
-## 🚀 Next Steps
+Computer vision pipeline for image capture and processing.
 
-1. **Record demonstrations** (30-50 episodes)
-2. **Train ACT policy** on demonstrations
-3. **Evaluate policy** in simulation
-4. **Prepare Feb 8 demo** presentation
+- Image capture and RGB processing modules
+- Image preprocessing utilities
+- Data transfer/storage modules
+- YOLOv8 model for object detection
+- Python dependencies (`req.txt`)
+- **`images/`** – Directory for sample captures or processed outputs
 
-See `docs/FEB8_SUCCESS_PLAN.md` for detailed timeline.
+#### `docs/`
 
----
+Research documentation and setup guides.
 
-## 🛠️ Tech Stack
+#### `feb8_demo/`
 
-- **Physics**: Genesis 0.3.13 (GPU-accelerated)
-- **ML Framework**: LeRobot 0.4.3 (HuggingFace)
-- **Policy**: ACT (Action Chunking Transformer)
-- **Robot**: Unitree G1 (12DOF version, 23 total DOF)
-- **Hardware**: RTX 4070 GPU
+Demo-specific code and utility scripts for testing and data inspection.
 
 ---
 
-## 📖 Key Achievements
+### `fall-25-work/`
 
-- **PushT Training**: 94% loss reduction in 11 minutes
-- **G1 Integration**: Full robot model with meshes in Genesis
-- **Environment**: Gymnasium-compatible manipulation environment
-- **Documentation**: Comprehensive setup and troubleshooting guides
+Contains previous skeletons and strucutre for using ROS nodes and Zephyr RTOS to control a one legged prototype.
 
----
+#### `rl-training-mujoco/`
 
-## 🆘 Need Help?
+MuJoCo-based reinforcement learning training for PPO (Proximal Policy Optimization).
 
-1. **Setup issues**: See `docs/vla_setup_short.md`
-2. **Planning questions**: See `docs/FEB8_SUCCESS_PLAN.md`
-3. **Technical details**: See `docs/README.md` (documentation index)
+- Training and evaluation scripts
+- Trained model checkpoints
+- Python dependencies (`req.txt`)
+- **`lib/`** – Core RL modules (agent, replay buffer, utilities)
 
----
+#### `ros2_ws/`
 
-**Project**: McMaster Humanoid Team  
-**Last Updated**: February 2, 2026
+ROS2 workspace for leg controller and simulation integration.
+
+- **`src/`** – ROS2 source packages:
+  - **`leg_controller/`** – Real-time leg control node(s) with custom message definitions, motor handling, and input processing
+  - **`simulation/`** – Simulation-related packages with launch files for visualization and testing
+- **`build/`** – Compiled artifacts (generated by colcon)
+- **`install/`** – Installed packages and setup scripts (auto-generated)
+- **`log/`** – Build and execution logs
+
+#### `zephyr_fw/`
+
+Zephyr RTOS firmware for embedded leg controller on microcontroller.
+
+- **`west.yml`** – Zephyr west manifest
+- **`app/`** – Firmware application:
+  - **`include/`** – Header files for core firmware modules: configuration, IMU reading, motor control, PID control, safety monitoring, serial communication, and state machine logic
+  - **`src/`** – Implementation files corresponding to each module

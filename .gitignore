@@ -73,7 +73,6 @@ __pycache__/
 # RL training logs and checkpoints
 rl-training-genesis/__pycache__/
 rl-training-genesis/logs/*
-<<<<<<< HEAD
 rl-training-genesis/rl-training-genesis/
 
 # Model checkpoints (large files)
@@ -86,9 +85,7 @@ vla_env/
 
 # Training outputs
 outputs/
-=======
 
 .DS_Store
 .vscode/
 __pycache__/
->>>>>>> a736a6f4d8db2af25b5f8cc2530edef6e1975e72

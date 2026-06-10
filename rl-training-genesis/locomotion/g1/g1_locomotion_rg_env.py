@@ -11,7 +11,7 @@ def gs_rand(lower, upper, batch_shape):
 
 # Environment class for the Go2 robot
 class Go2Env:
-    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False):
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=True):
         self.num_envs = num_envs
         self.num_obs = obs_cfg["num_obs"]
         self.num_actions = env_cfg["num_actions"]
@@ -165,7 +165,12 @@ class Go2Env:
                 buf.copy_(torch.nan_to_num(buf, nan=0.0))
 
     def _resample_commands(self, envs_idx):
-        commands = gs_rand(*self.commands_limits, (self.num_envs,))
+        # goal to move forward
+        commands = torch.zeros((self.num_envs, self.num_commands), device=self.device)
+        commands[:, 0] = 0.5  # forward x velocity (m/s)
+        commands[:, 1] = 0.0
+        commands[:, 2] = 0.0
+
         if envs_idx is None:
             self.commands.copy_(commands)
         else:
@@ -235,7 +240,7 @@ class Go2Env:
         self.reset_buf = self.episode_length_buf > self.max_episode_length
         self.reset_buf |= torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]
         self.reset_buf |= torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"]
-        self.reset_buf |= (self.base_pos[:, 2] < 0.2) # Terminate if fallen
+        self.reset_buf |= (self.base_pos[:, 2] < 0.12) # Terminate if fallen
 
         # Compute timeout
         self.extras["time_outs"] = (self.episode_length_buf > self.max_episode_length).to(dtype=gs.tc_float)
@@ -345,14 +350,12 @@ class Go2Env:
     # REWARDS
     def _reward_tracking_lin_vel(self):
         # Tracking of linear velocity commands (xy axes)
-        commands_xy = torch.nan_to_num(self.commands[:, :2], nan=0.0)
-        lin_vel_xy = torch.nan_to_num(self.base_lin_vel[:, :2], nan=0.0)
-        lin_vel_error = torch.sum(torch.square(commands_xy - lin_vel_xy), dim=1)
-        return torch.exp(-lin_vel_error / self.reward_cfg["tracking_sigma"]) 
+        lin_vel_x = self.base_lin_vel[:, 0]
+        return torch.exp(-torch.square(lin_vel_x - self.commands[:, 0]))
     
     def _reward_tracking_lin_pos(self):
         # Tracking of linear position commands (x axes)
-        lin_pos_error = torch.sum(torch.square(self.commands[:, 3] - self.base_pos[:, 0]))
+        lin_pos_error = torch.sum(torch.square(self.commands[:, 0] - self.base_pos[:, 0]))
         return torch.exp(-lin_pos_error / self.reward_cfg["tracking_sigma"])
 
     def _reward_tracking_ang_vel(self):
@@ -441,10 +444,22 @@ class Go2Env:
     def _reward_alive(self):
         # Reward for staying alive/upright - encourages survival
         return torch.ones(self.num_envs, device=self.device)
+    
+    def _reward_forward(self):
+        # Reward for forward velocity
+        return self.base_lin_vel[:, 0]
 
-    def _reward_standing(self):
-        # Reward for standing still
-        lin_vel_penalty = torch.sum(torch.square(self.base_lin_vel[:, :2]), dim=1)
-        ang_vel_penalty = torch.sum(torch.square(self.base_ang_vel), dim=1)
-        joint_vel_penalty = torch.sum(torch.square(self.dof_vel), dim=1)
-        return lin_vel_penalty + ang_vel_penalty * 0.1 + joint_vel_penalty * 0.01
+    def _reward_no_motion(self):
+        # Reward for staying still
+        speed = torch.norm(self.base_lin_vel[:, :2], dim=1) 
+        return torch.exp(-speed * 10.0)
+ 
+    def _reward_narrow_stance(self):
+        # Reward for keeping a narrow stance
+        left_roll = self.dof_pos[:, self.env_cfg["joint_names"].index("left_hip_roll_joint")]
+        right_roll = self.dof_pos[:, self.env_cfg["joint_names"].index("right_hip_roll_joint")]
+        return left_roll**2 + right_roll**2 # if the angles are larger, then the penalty increases
+    
+    def _reward_no_sideways(self):
+        # Reward for moving sideways
+        return self.base_lin_vel[:, 1] ** 2

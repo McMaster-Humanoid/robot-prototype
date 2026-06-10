@@ -9,7 +9,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from g1_manipulation.env import G1ManipulationEnv
+from env import G1ManipulationEnv
 
 def test_basic():
     """Test basic environment functionality"""

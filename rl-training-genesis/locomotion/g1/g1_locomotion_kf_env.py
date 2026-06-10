@@ -1,0 +1,474 @@
+import math
+
+import torch
+import os
+import genesis as gs
+from genesis.utils.geom import quat_to_xyz, transform_by_quat, inv_quat, transform_quat_by_quat
+from genesis.utils.misc import tensor_to_array
+
+def gs_rand(lower, upper, batch_shape):
+    return (upper - lower) * torch.rand(size=(*batch_shape, *lower.shape), dtype=gs.tc_float, device=gs.device) + lower
+
+# Environment class for the Go2 robot
+class Go2Env:
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False):
+        self.num_envs = num_envs
+        self.num_obs = obs_cfg["num_obs"]
+        self.num_actions = env_cfg["num_actions"]
+        self.num_commands = command_cfg["num_commands"]
+        self.device = gs.device
+
+        self.simulate_action_latency = True 
+        self.dt = 0.02 
+        self.max_episode_length = math.ceil(env_cfg["episode_length_s"] / self.dt)
+
+        self.env_cfg = env_cfg
+        self.obs_cfg = obs_cfg
+        self.reward_cfg = reward_cfg
+        self.command_cfg = command_cfg
+
+        self.obs_scales = obs_cfg["obs_scales"]
+        self.reward_scales = reward_cfg["reward_scales"]
+
+        # create scene
+        self.scene = gs.Scene(
+            sim_options=gs.options.SimOptions(dt=self.dt, substeps=2),
+            rigid_options=gs.options.RigidOptions(
+                enable_self_collision=False,
+                tolerance=1e-5,
+                # For this locomotion policy, there are usually no more than 20 collision pairs. Setting a low value
+                # can save memory. Violating this condition will raise an exception.
+                max_collision_pairs=20,
+            ),
+            viewer_options=gs.options.ViewerOptions(
+                camera_pos=(2.0, -2.0, 1.5),
+                camera_lookat=(0.0, 0.0, 0.5),
+                camera_fov=40,
+                max_FPS=int(1.0 / self.dt),
+            ),
+            vis_options=gs.options.VisOptions(rendered_envs_idx=[0]),
+            show_viewer=show_viewer,
+        )
+
+        self.scene.add_entity(gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True))
+
+        # Add robot - URDF file is in rl-training-genesis/models/g1_12dof.urdf
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        urdf_path = os.path.join(project_root, "rl-training-genesis", "models", "g1_12dof.urdf")
+        
+        self.robot = self.scene.add_entity(
+            gs.morphs.URDF(
+                file=urdf_path,
+                pos=self.env_cfg["base_init_pos"],
+                quat=self.env_cfg["base_init_quat"],
+            ),
+        )
+
+        self.feet = ["left_ankle_roll_link", "right_ankle_roll_link"]
+        self.feet_air_time = torch.zeros((self.num_envs, 2), device=self.device)
+        self.feet_contact_time = torch.zeros((self.num_envs, 2), device=self.device)
+
+        self.foot_sensors = []
+        for name in self.feet:
+            sensor = self.scene.add_sensor(
+                gs.sensors.Contact(
+                    entity_idx=self.robot.idx,
+                    link_idx_local=self.robot.get_link(name).idx_local,
+                    draw_debug=False,
+                )
+            )
+            self.foot_sensors.append(sensor)
+
+
+        # build
+        self.scene.build(n_envs=num_envs)
+
+        # names to indices
+        self.motors_dof_idx = torch.tensor(
+            [self.robot.get_joint(name).dof_start for name in self.env_cfg["joint_names"]],
+            dtype=gs.tc_int, device=gs.device,
+        )
+        self.actions_dof_idx = torch.argsort(self.motors_dof_idx)
+
+        # PD control parameters
+        self.robot.set_dofs_kp([self.env_cfg["kp"]] * self.num_actions, self.motors_dof_idx)
+        self.robot.set_dofs_kv([self.env_cfg["kd"]] * self.num_actions, self.motors_dof_idx)
+
+        # Define global gravity direction vector
+        self.global_gravity = torch.tensor([[0.0, 0.0, -1.0]], dtype=gs.tc_float, device=gs.device).expand(self.num_envs, -1)
+
+        # Initial state setup
+        self.init_base_pos = torch.tensor(self.env_cfg["base_init_pos"], dtype=gs.tc_float, device=gs.device)
+        self.init_base_quat = torch.tensor(self.env_cfg["base_init_quat"], dtype=gs.tc_float, device=gs.device)
+        self.inv_base_init_quat = inv_quat(self.init_base_quat)
+        self.init_dof_pos = torch.tensor(
+            [self.env_cfg["default_joint_angles"][name] for name in self.env_cfg["joint_names"]],
+            dtype=gs.tc_float, device=gs.device,
+        )
+        self.init_qpos = torch.concatenate((self.init_base_pos, self.init_base_quat, self.init_dof_pos))
+        # Expand inv_base_init_quat to match batch dimension for transform
+        inv_base_init_quat_batched = self.inv_base_init_quat.unsqueeze(0).expand(self.num_envs, -1)
+        self.init_projected_gravity = transform_by_quat(self.global_gravity, inv_base_init_quat_batched)
+
+        self.base_lin_vel = torch.zeros((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
+        self.base_ang_vel = torch.zeros((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
+        
+        self.projected_gravity = torch.zeros((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
+        self.obs_buf = torch.zeros((self.num_envs, self.num_obs), dtype=gs.tc_float, device=gs.device)
+        self.rew_buf = torch.zeros((self.num_envs,), dtype=gs.tc_float, device=gs.device)
+        self.reset_buf = torch.ones((self.num_envs,), dtype=gs.tc_bool, device=gs.device)
+        self.episode_length_buf = torch.zeros((self.num_envs,), dtype=gs.tc_int, device=gs.device)
+        self.commands = torch.zeros((self.num_envs, self.num_commands), dtype=gs.tc_float, device=gs.device)
+        self.commands_scale = torch.tensor(
+            [self.obs_scales["lin_vel"], self.obs_scales["lin_vel"], self.obs_scales["ang_vel"]],
+            device=gs.device, dtype=gs.tc_float,
+        )
+        self.commands_limits = [
+            torch.tensor(values, dtype=gs.tc_float, device=gs.device)
+            for values in zip(
+                self.command_cfg["lin_vel_x_range"],
+                self.command_cfg["lin_vel_y_range"],
+                self.command_cfg["ang_vel_range"],
+            )
+        ]
+        self.actions = torch.zeros((self.num_envs, self.num_actions), dtype=gs.tc_float, device=gs.device)
+        self.last_actions = torch.zeros_like(self.actions)
+        self.dof_pos = torch.zeros_like(self.actions)
+        self.dof_vel = torch.zeros_like(self.actions)
+        self.last_dof_vel = torch.zeros_like(self.actions)
+        self.base_pos = torch.zeros((self.num_envs, 3), dtype=gs.tc_float, device=gs.device)
+        self.base_quat = torch.zeros((self.num_envs, 4), dtype=gs.tc_float, device=gs.device)
+        self.default_dof_pos = torch.tensor(
+            [self.env_cfg["default_joint_angles"][name] for name in self.env_cfg["joint_names"]],
+            dtype=gs.tc_float, device=gs.device,
+        )
+        self.extras = dict()
+        self.extras["observations"] = dict()
+
+        self.reward_functions, self.episode_sums = dict(), dict()
+        for name in self.reward_scales.keys():
+            self.reward_scales[name] *= self.dt
+            self.reward_functions[name] = getattr(self, "_reward_" + name)
+            self.episode_sums[name] = torch.zeros((self.num_envs,), dtype=gs.tc_float, device=gs.device)
+        self._check_nan_initialization()
+
+    def _check_nan_initialization(self):
+        """Check for NaN values in initialized buffers"""
+        buffers = [
+            self.base_lin_vel, self.base_ang_vel, self.obs_buf, 
+            self.rew_buf, self.commands, self.actions, self.dof_pos, self.dof_vel
+        ]
+        print("Checking for NaN values in initialized buffers")
+        for i, buf in enumerate(buffers):
+            if torch.isnan(buf).any():
+                print(f"WARNING: Buffer {i} contains NaN values after initialization")
+                buf.copy_(torch.nan_to_num(buf, nan=0.0))
+
+    def _resample_commands(self, envs_idx):
+        commands = gs_rand(*self.commands_limits, (self.num_envs,))
+        if envs_idx is None:
+            self.commands.copy_(commands)
+        else:
+            torch.where(envs_idx[:, None], commands, self.commands, out=self.commands)
+
+    def step(self, actions):
+        self.actions = torch.clip(actions, -self.env_cfg["clip_actions"], self.env_cfg["clip_actions"])
+        exec_actions = self.last_actions if self.simulate_action_latency else self.actions
+        target_dof_pos = exec_actions * self.env_cfg["action_scale"] + self.default_dof_pos
+        
+        # one_leg_robot: base has 6 DOFs, then joints
+        num_base_dofs = 6
+        self.robot.control_dofs_position(
+            target_dof_pos[:, self.actions_dof_idx], 
+            slice(num_base_dofs, num_base_dofs + self.num_actions)
+        )
+        self.scene.step()
+
+        # update buffers
+        self.episode_length_buf += 1
+        self.base_pos = self.robot.get_pos()
+        self.base_quat = self.robot.get_quat()
+        
+        contacts = torch.stack(
+            [(sensor.read()[0] == True).int() for sensor in self.foot_sensors],
+            dim=1
+        )  # (num_envs, 2)
+        
+        # contact → increment contact time, reset air time
+        self.feet_contact_time += contacts * self.dt
+        self.feet_air_time *= contacts.logical_not()
+
+        # air → increment air time, reset contact time
+        self.feet_air_time += (~contacts) * self.dt
+        self.feet_contact_time *= contacts
+
+        
+        # Camera tracking logic
+        if hasattr(self.scene, 'viewer') and self.scene.viewer is not None and self.num_envs > 0:
+            try:
+                robot_pos = tensor_to_array(self.base_pos[0])
+                self.scene.viewer.set_camera(
+                    pos=(robot_pos[0] + 2.0, robot_pos[1] - 2.0, robot_pos[2] + 1.5), 
+                    lookat=(robot_pos[0], robot_pos[1], robot_pos[2])
+                )
+            except Exception: pass
+
+        self.base_euler = quat_to_xyz(transform_quat_by_quat(self.inv_base_init_quat, self.base_quat), rpy=True, degrees=True)
+        inv_base_quat = inv_quat(self.base_quat)
+        self.base_lin_vel = transform_by_quat(self.robot.get_vel(), inv_base_quat)
+        self.base_ang_vel = transform_by_quat(self.robot.get_ang(), inv_base_quat)
+        self.projected_gravity = transform_by_quat(self.global_gravity, inv_base_quat)
+        self.dof_pos = self.robot.get_dofs_position(self.motors_dof_idx)
+        self.dof_vel = self.robot.get_dofs_velocity(self.motors_dof_idx)
+
+        # compute reward
+        self.rew_buf.zero_()
+        for name, reward_func in self.reward_functions.items():
+            rew = reward_func() * self.reward_scales[name]
+            self.rew_buf += rew
+            self.episode_sums[name] += rew
+
+        # resample commands
+        self._resample_commands(self.episode_length_buf % int(self.env_cfg["resampling_time_s"] / self.dt) == 0)
+
+        # Termination conditions
+        self.reset_buf = self.episode_length_buf > self.max_episode_length
+        self.reset_buf |= torch.abs(self.base_euler[:, 1]) > self.env_cfg["termination_if_pitch_greater_than"]
+        self.reset_buf |= torch.abs(self.base_euler[:, 0]) > self.env_cfg["termination_if_roll_greater_than"]
+        self.reset_buf |= (self.base_pos[:, 2] < 0.2) # Terminate if fallen
+
+        # Compute timeout
+        self.extras["time_outs"] = (self.episode_length_buf > self.max_episode_length).to(dtype=gs.tc_float)
+
+        # Reset environment if necessary
+        self._reset_idx(self.reset_buf)
+
+        # update observations
+        self._update_observation()
+
+        self.last_actions.copy_(self.actions)
+        self.last_dof_vel.copy_(self.dof_vel)
+
+        self.extras["observations"]["critic"] = self.obs_buf
+
+        return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
+
+    def _reset_idx(self, envs_idx=None):
+        # reset state
+        self.robot.set_qpos(self.init_qpos, envs_idx=envs_idx, zero_velocity=True, skip_forward=True)
+
+        # reset buffers
+        if envs_idx is None:
+            # Full reset - broadcast init values to all envs
+            self.base_pos[:] = self.init_base_pos.unsqueeze(0)
+            self.base_quat[:] = self.init_base_quat.unsqueeze(0)
+            self.projected_gravity[:] = self.init_projected_gravity
+            self.dof_pos[:] = self.init_dof_pos.unsqueeze(0)
+            self.base_lin_vel.zero_()
+            self.base_ang_vel.zero_()
+            self.dof_vel.zero_()
+            self.actions.zero_()
+            self.last_actions.zero_()
+            self.last_dof_vel.zero_()
+            self.episode_length_buf.zero_()
+            self.reset_buf.fill_(True)
+        else:
+            # Selective reset using boolean mask
+            # Expand init tensors to batch shape for torch.where
+            init_base_pos_batch = self.init_base_pos.unsqueeze(0).expand(self.num_envs, -1)
+            init_base_quat_batch = self.init_base_quat.unsqueeze(0).expand(self.num_envs, -1)
+            init_dof_pos_batch = self.init_dof_pos.unsqueeze(0).expand(self.num_envs, -1)
+            
+            self.base_pos = torch.where(envs_idx[:, None], init_base_pos_batch, self.base_pos)
+            self.base_quat = torch.where(envs_idx[:, None], init_base_quat_batch, self.base_quat)
+            self.projected_gravity = torch.where(envs_idx[:, None], self.init_projected_gravity, self.projected_gravity)
+            self.dof_pos = torch.where(envs_idx[:, None], init_dof_pos_batch, self.dof_pos)
+            self.base_lin_vel.masked_fill_(envs_idx[:, None], 0.0)
+            self.base_ang_vel.masked_fill_(envs_idx[:, None], 0.0)
+            self.dof_vel.masked_fill_(envs_idx[:, None], 0.0)
+            self.actions.masked_fill_(envs_idx[:, None], 0.0)
+            self.last_actions.masked_fill_(envs_idx[:, None], 0.0)
+            self.last_dof_vel.masked_fill_(envs_idx[:, None], 0.0)
+            self.episode_length_buf.masked_fill_(envs_idx, 0)
+            self.reset_buf.masked_fill_(envs_idx, True)
+
+        self._resample_commands(envs_idx)
+
+    def _update_observation(self):
+        # Clip observations to prevent extreme values
+        base_lin_vel = torch.clamp(self.base_lin_vel, -10.0, 10.0)
+        base_ang_vel = torch.clamp(self.base_ang_vel, -10.0, 10.0)
+        projected_gravity = torch.clamp(self.projected_gravity, -1.0, 1.0)
+        dof_pos = torch.clamp(self.dof_pos, -3.14, 3.14)
+        dof_vel = torch.clamp(self.dof_vel, -100.0, 100.0)
+        
+        self.obs_buf = torch.cat(
+            [
+                base_lin_vel * self.obs_scales["lin_vel"],
+                base_ang_vel * self.obs_scales["ang_vel"],
+                projected_gravity,
+                self.commands * self.commands_scale,
+                (dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],
+                dof_vel * self.obs_scales["dof_vel"],
+                self.actions,
+            ],
+            dim=-1,
+        )
+        
+        # Final safety check
+        self.obs_buf = torch.nan_to_num(self.obs_buf, nan=0.0)
+
+    def reset(self):
+        self._reset_idx()
+        self._update_observation()
+        return self.obs_buf, None
+
+    def get_observations(self):
+        self.obs_buf = torch.cat(
+            [
+                self.base_lin_vel * self.obs_scales["lin_vel"],
+                self.base_ang_vel * self.obs_scales["ang_vel"],
+                self.projected_gravity,
+                self.commands * self.commands_scale,
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales["dof_pos"],
+                self.dof_vel * self.obs_scales["dof_vel"],
+                self.actions,
+            ],
+            dim=-1,
+        )
+        self.extras["observations"]["critic"] = self.obs_buf
+        return self.obs_buf, self.extras
+    
+    def get_privileged_observations(self):
+        return None
+
+    # REWARDS
+    def _reward_tracking_lin_vel(self):
+        # Tracking of linear velocity commands (xy axes)
+        commands_xy = torch.nan_to_num(self.commands[:, :2], nan=0.0)
+        lin_vel_xy = torch.nan_to_num(self.base_lin_vel[:, :2], nan=0.0)
+        lin_vel_error = torch.sum(torch.square(commands_xy - lin_vel_xy), dim=1)
+        return torch.exp(-lin_vel_error / self.reward_cfg["tracking_sigma"]) 
+    
+    def _reward_tracking_lin_pos(self):
+        # Tracking of linear position commands (x axes)
+        lin_pos_error = torch.sum(torch.square(self.commands[:, 3] - self.base_pos[:, 0]))
+        return torch.exp(-lin_pos_error / self.reward_cfg["tracking_sigma"])
+
+    def _reward_tracking_ang_vel(self):
+        # Tracking of angular velocity commands (yaw)
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error / self.reward_cfg["tracking_sigma"])
+
+    def _reward_lin_vel_z(self):
+        # Penalize z axis base linear velocity
+        return torch.square(self.base_lin_vel[:, 2])
+
+    def _reward_action_rate(self):
+        # Penalize changes in actions
+        return torch.sum(torch.square(self.last_actions - self.actions), dim=1)
+
+    def _reward_similar_to_default(self):
+        # Penalize joint poses far away from default pose
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1)
+
+    def _reward_base_height(self):
+        # Penalize base height away from target
+        return torch.abs(self.base_pos[:, 2] - self.reward_cfg["base_height_target"])
+    
+    def _reward_feet_touch_ground(self):
+        # Penalize low ankle joint velocities
+        left_ankle_pitch_quat = self.robot.get_link("left_ankle_pitch_link").get_quat()
+        left_ankle_roll_quat = self.robot.get_link("left_ankle_roll_link").get_quat()
+        right_ankle_pitch_quat = self.robot.get_link("right_ankle_pitch_link").get_quat()
+        right_ankle_roll_quat = self.robot.get_link("right_ankle_roll_link").get_quat()
+
+        left_ankle_offset = torch.square((left_ankle_pitch_quat)).sum(dim=1) + torch.square((left_ankle_roll_quat)).sum(dim=1) 
+        right_ankle_offset = torch.square((right_ankle_pitch_quat)).sum(dim=1) + torch.square((right_ankle_roll_quat)).sum(dim=1)
+        return left_ankle_offset + right_ankle_offset
+    
+    def _reward_foot_clearance(self):
+        left_z = self.robot.get_link("left_ankle_roll_link").get_pos()[:, 2]
+        right_z = self.robot.get_link("right_ankle_roll_link").get_pos()[:, 2]
+        clearance = torch.relu(left_z - 0.05) + torch.relu(right_z - 0.05)
+        return clearance
+    
+    def _reward_feet_air_time(self):
+        # contacts: (num_envs, 2)
+        contacts = self.feet_contact_time > 0.0
+
+        # exactly one foot touching
+        single_stance = contacts.sum(dim=1) == 1
+
+        # time in current mode
+        in_mode_time = torch.where(
+            contacts,
+            self.feet_contact_time,
+            self.feet_air_time,
+        )
+
+        # take min across feet (Isaac-style)
+        reward = torch.min(
+            torch.where(single_stance.unsqueeze(1), in_mode_time, 0.0),
+            dim=1
+        )[0]
+
+        # clamp
+        reward = torch.clamp(reward, max=0.6)
+
+        # no reward for tiny commands
+        moving = torch.norm(self.commands[:, :2], dim=1) > 0.1
+        reward *= moving
+
+        return reward
+    
+    def _reward_knee_bend(self):
+        # Reward for bending knees (to encourage leg lift)
+        left_knee_angle = self.dof_pos[:, self.env_cfg["joint_names"].index("left_knee_joint")]
+        right_knee_angle = self.dof_pos[:, self.env_cfg["joint_names"].index("right_knee_joint")]
+        knee_bend_reward = torch.sin(left_knee_angle) ** 2 + torch.sin(right_knee_angle) ** 2
+        return knee_bend_reward
+
+
+    def _reward_orientation(self):
+        # Reward for maintaining upright orientation (penalize roll and pitch)
+        # Convert degrees to radians before squaring to get reasonable scale
+        roll_rad = self.base_euler[:, 0] * (3.14159 / 180.0)
+        pitch_rad = self.base_euler[:, 1] * (3.14159 / 180.0)
+        roll_pitch_penalty = torch.square(roll_rad) + torch.square(pitch_rad)
+        return roll_pitch_penalty
+    
+    def _reward_alive(self):
+        # Reward for staying alive/upright - encourages survival
+        return torch.ones(self.num_envs, device=self.device)
+
+    def _reward_standing(self):
+        # Reward for standing still
+        lin_vel_penalty = torch.sum(torch.square(self.base_lin_vel[:, :2]), dim=1)
+        ang_vel_penalty = torch.sum(torch.square(self.base_ang_vel), dim=1)
+        joint_vel_penalty = torch.sum(torch.square(self.dof_vel), dim=1)
+        return lin_vel_penalty + ang_vel_penalty * 0.1 + joint_vel_penalty * 0.01
+
+    def _reward_gait_frequency(self):
+        # Penalize if both feet are in the air or on ground for too long
+        contacts = self.feet_contact_time > 0.0
+        both_contact = contacts.sum(dim=1) == 2
+        both_air = contacts.sum(dim=1) == 0
+        return -(both_contact.float() * 0.5 + both_air.float() * 1.0)
+    
+    def _reward_forward_progress(self):
+        # Reward for actually moving in commanded direction
+        cmd_vel = self.commands[:, :2]
+        actual_vel = self.base_lin_vel[:, :2]
+        return torch.sum(cmd_vel * actual_vel, dim=1)
+
+    def _reward_hip_roll(self):
+        # Penalize hip roll joints deviating from target (legs closer together)
+        left_hip_roll_idx = self.env_cfg["joint_names"].index("left_hip_roll_joint")
+        right_hip_roll_idx = self.env_cfg["joint_names"].index("right_hip_roll_joint")
+        
+        # Target: left=+0.08, right=-0.08 (legs closer)
+        left_error = torch.square(self.dof_pos[:, left_hip_roll_idx] - 0.08)
+        right_error = torch.square(self.dof_pos[:, right_hip_roll_idx] + 0.08)
+        
+        return left_error + right_error
